@@ -46,8 +46,8 @@ Demonstrating modern centroid localization concepts in MRI and AI
 
 Exploring differences between probabilistic and peak-based localization
 
-🔗 Live App
-[[https://cine-mri-centroid-deeplearning-app-8dsf6ayqtam7jqsxiskpxm.streamlit.app/](https://pahhz8xqgyzbhuxmmtfa9e.streamlit.app/)](https://mri-image-quality-lab-2tvyt2uctfuzgfvj3kzptp.streamlit.app/)
+🔗 [Live App](https://mri-image-quality-lab-2tvyt2uctfuzgfvj3kzptp.streamlit.app/)
+
 
 
 
