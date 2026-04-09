@@ -1,44 +1,27 @@
 # app_centroid_net.py
 # Streamlit app for centroid prediction using DSNT-trained TinyUNetLogits
 #
-# Teaching focus:
-#   (1) Network probability map (spatial softmax)
-#   (2) DSNT centroid (expectation over probability map)
-#   (3) ROI box centered at centroid with size = image_size / 2 (auto; scale-consistent)
-#
-# Inputs (FULL FOV only; NOT cropped):
-#   - Cine CMR frames (2CH / 3CH / 4CH / SAX) as PNG/JPG/TIF/BMP
-#   - MATLAB .mat containing variable `image` (HxW or HxWxT)
-#
-# Coordinate convention (matches training):
-#   - 1-based coordinates: x = column in [1..W], y = row in [1..H]
-#
-# Run:
-#   cd D:\Course Review 07192024\app_centroid_net
-#   streamlit run app_centroid_net.py
-#
-# Requirements:
-#   pip install streamlit torch opencv-python scipy numpy pillow
-#
-# Checkpoint handling (NO absolute paths required):
-#   - By default, this app looks for:
-#       best_centroid_xy_net_DSNT_EPE.pt
-#     in the SAME folder as this script.
-#   - You may still browse/select a checkpoint, but relative is the default.
+# UI rewrite notes:
+#   - Keeps the existing working model and utility functions unchanged
+#   - Moves the main result figure to the first visible output region
+#   - Adds a built-in demo preview when no upload is provided
+#   - Adds download buttons for NSF-ready PNG figures
+#   - Keeps explanations and feature-map teaching sections below the primary figure
 
 import os
+from io import BytesIO
 from pathlib import Path
+from collections import OrderedDict
+
 import numpy as np
 import scipy.io as sio
 import torch
 import torch.nn as nn
 import streamlit as st
-from PIL import Image
-from collections import OrderedDict
-from PIL import ImageDraw
+from PIL import Image, ImageDraw
 
 # ============================================================
-# Model definitions (MUST match training)
+# Model definitions (UNCHANGED)
 # ============================================================
 
 class ConvBlock(nn.Module):
@@ -53,6 +36,7 @@ class ConvBlock(nn.Module):
 
     def forward(self, x):
         return self.net(x)
+
 
 class FeatureHook:
     """Capture intermediate activations by module name."""
@@ -69,7 +53,6 @@ class FeatureHook:
 
     def _make_hook(self, name):
         def hook(module, inp, out):
-            # out: torch.Tensor [B,C,H,W]
             self.feats[name] = out.detach()
         return hook
 
@@ -77,7 +60,8 @@ class FeatureHook:
         for h in self.handles:
             h.remove()
         self.handles = []
-        
+
+
 class TinyUNetLogits(nn.Module):
     def __init__(self, in_ch: int = 1, base: int = 32):
         super().__init__()
@@ -95,7 +79,7 @@ class TinyUNetLogits(nn.Module):
         self.up1 = nn.ConvTranspose2d(base * 2, base, 2, stride=2)
         self.dec1 = ConvBlock(base * 2, base)
 
-        self.out = nn.Conv2d(base, 1, 1)  # logits
+        self.out = nn.Conv2d(base, 1, 1)
 
     def forward(self, x):
         e1 = self.enc1(x)
@@ -112,22 +96,24 @@ class TinyUNetLogits(nn.Module):
         u1 = self.up1(d2)
         d1 = self.dec1(torch.cat([u1, e1], dim=1))
 
-        z = self.out(d1)  # [B,1,H,W]
+        z = self.out(d1)
         return z
 
 # ============================================================
-# Pre/post utilities (match training)
+# Pre/post utilities (UNCHANGED)
 # ============================================================
 
 def mad(x: np.ndarray, eps: float = 1e-6) -> float:
     med = np.median(x)
     return float(np.median(np.abs(x - med)) + eps)
 
+
 def robust_normalize(img: np.ndarray) -> np.ndarray:
     img = img.astype(np.float32)
     img = img - np.median(img)
     img = img / (mad(img) + 1e-6)
     return img
+
 
 def spatial_softmax_2d_logits(z: torch.Tensor, beta: float) -> torch.Tensor:
     """
@@ -142,6 +128,7 @@ def spatial_softmax_2d_logits(z: torch.Tensor, beta: float) -> torch.Tensor:
     p = p / (p.sum(dim=1, keepdim=True) + 1e-8)
     return p.view(B, 1, H, W)
 
+
 def expected_xy_from_prob(p: torch.Tensor) -> torch.Tensor:
     """
     p: [B,1,H,W], sum-to-1
@@ -155,6 +142,7 @@ def expected_xy_from_prob(p: torch.Tensor) -> torch.Tensor:
     y = (p * ys).sum(dim=(1, 2, 3))
     return torch.stack([x, y], dim=1)
 
+
 def hard_argmax_xy(p: torch.Tensor) -> torch.Tensor:
     """
     p: [B,1,H,W]
@@ -166,11 +154,13 @@ def hard_argmax_xy(p: torch.Tensor) -> torch.Tensor:
     c = (idx % W) + 1
     return torch.stack([c, r], dim=1).float()
 
+
 def to01(x: np.ndarray) -> np.ndarray:
     x = x.astype(np.float32)
     x = x - x.min()
     x = x / (x.max() + 1e-8)
     return np.clip(x, 0, 1)
+
 
 def overlay_heatmap(gray01: np.ndarray, heat01: np.ndarray, alpha: float = 0.35) -> np.ndarray:
     """
@@ -178,10 +168,11 @@ def overlay_heatmap(gray01: np.ndarray, heat01: np.ndarray, alpha: float = 0.35)
     heat01: HxW in [0,1]
     Returns RGB uint8 (heat injected into red channel for visibility)
     """
-    base = np.stack([gray01, gray01, gray01], axis=2)  # RGB float
+    base = np.stack([gray01, gray01, gray01], axis=2)
     out = base.copy()
-    out[..., 0] = np.clip((1 - alpha) * out[..., 0] + alpha * heat01, 0, 1)  # red channel
+    out[..., 0] = np.clip((1 - alpha) * out[..., 0] + alpha * heat01, 0, 1)
     return (out * 255).astype(np.uint8)
+
 
 def draw_cross_rgb(img_rgb_u8: np.ndarray, x: float, y: float, color_rgb, r: int = 6, t: int = 2) -> np.ndarray:
     H, W, _ = img_rgb_u8.shape
@@ -192,8 +183,7 @@ def draw_cross_rgb(img_rgb_u8: np.ndarray, x: float, y: float, color_rgb, r: int
 
     im = Image.fromarray(img_rgb_u8)
     dr = ImageDraw.Draw(im)
-    # thickness via repeated lines
-    for k in range(-(t//2), (t//2)+1):
+    for k in range(-(t // 2), (t // 2) + 1):
         dr.line([(cx - r, cy + k), (cx + r, cy + k)], fill=tuple(color_rgb), width=1)
         dr.line([(cx + k, cy - r), (cx + k, cy + r)], fill=tuple(color_rgb), width=1)
     return np.array(im, dtype=np.uint8)
@@ -214,16 +204,13 @@ def draw_roi_box_rgb(img_rgb_u8: np.ndarray, x: float, y: float, box_w: int, box
 
     im = Image.fromarray(img_rgb_u8)
     dr = ImageDraw.Draw(im)
-    # thickness by drawing multiple rectangles
     for k in range(t):
         dr.rectangle([x0 - k, y0 - k, x1 + k, y1 + k], outline=tuple(color_rgb))
     return np.array(im, dtype=np.uint8)
 
 
 def canon_to_raw(xy_canon, orig_h: int, orig_w: int, canon_h: int, canon_w: int):
-    """
-    Map 1-based canonical coords -> 1-based original coords
-    """
+    """Map 1-based canonical coords -> 1-based original coords"""
     x_c, y_c = float(xy_canon[0]), float(xy_canon[1])
     x_raw = x_c * (orig_w / float(canon_w))
     y_raw = y_c * (orig_h / float(canon_h))
@@ -232,7 +219,7 @@ def canon_to_raw(xy_canon, orig_h: int, orig_w: int, canon_h: int, canon_w: int)
     return x_raw, y_raw
 
 # ============================================================
-# Input loading
+# Input loading (UNCHANGED)
 # ============================================================
 
 def load_user_input(uploaded_file):
@@ -261,7 +248,6 @@ def load_user_input(uploaded_file):
         else:
             raise ValueError(f"`image` must be HxW or HxWxT, got shape={img.shape}")
 
-        # Optional GT
         gt = None
         if "centroid_corrected" in S and S["centroid_corrected"] is not None:
             c = np.array(S["centroid_corrected"]).squeeze().astype(np.float32)
@@ -272,11 +258,10 @@ def load_user_input(uploaded_file):
             if c.size >= 2:
                 gt = (float(c[0]), float(c[1]))
 
-        out["mat_image"] = img.astype(np.float32)  # store full
+        out["mat_image"] = img.astype(np.float32)
         out["gt_xy_raw"] = gt
         out["note"] = f"Loaded MAT file with image shape {img.shape}."
 
-        # pick frame later using slider (if T exists)
         if img.ndim == 2:
             img2d = img
         else:
@@ -288,7 +273,6 @@ def load_user_input(uploaded_file):
         out["img2d"] = img2d
         return out
 
-    # image file
     im = Image.open(uploaded_file).convert("L")
     img2d = np.array(im).astype(np.float32)
     out["orig_h"], out["orig_w"] = int(img2d.shape[0]), int(img2d.shape[1])
@@ -297,30 +281,56 @@ def load_user_input(uploaded_file):
     return out
 
 # ============================================================
-# Checkpoint handling (relative by default)
+# Checkpoint handling
 # ============================================================
 
 APP_DIR = Path(__file__).resolve().parent
 DEFAULT_CKPT_NAME = "best_centroid_xy_net_DSNT_EPE.pt"
 DEFAULT_CKPT_PATH = APP_DIR / DEFAULT_CKPT_NAME
+DEMO_IMAGE_CANDIDATES = [
+    APP_DIR / "demo_example.png",
+    APP_DIR / "demo.png",
+    APP_DIR / "high_cine.png",
+]
+
 
 def resolve_ckpt_path(user_text: str) -> Path:
-    """
-    If user supplies a relative name, interpret it relative to app folder.
-    If absolute, use it as-is.
-    """
     p = Path(user_text.strip())
     if str(p) == "":
         return DEFAULT_CKPT_PATH
     if p.is_absolute():
         return p
-    return (APP_DIR / p)
+    return APP_DIR / p
+
+
+def find_demo_image() -> Path | None:
+    for p in DEMO_IMAGE_CANDIDATES:
+        if p.exists():
+            return p
+    return None
+
+
+def load_demo_input():
+    demo_path = find_demo_image()
+    if demo_path is None:
+        return None
+    im = Image.open(demo_path).convert("L")
+    img2d = np.array(im).astype(np.float32)
+    return {
+        "img2d": img2d,
+        "orig_h": int(img2d.shape[0]),
+        "orig_w": int(img2d.shape[1]),
+        "gt_xy_raw": None,
+        "note": f"Showing built-in demo example: {demo_path.name}.",
+        "n_frames": 1,
+    }
 
 # ============================================================
-# Model loading/inference
+# Model loading/inference (UNCHANGED)
 # ============================================================
 
 @st.cache_resource
+
 def load_model(ckpt_path_str: str, device: str):
     ckpt_path = str(ckpt_path_str)
     ckpt = torch.load(ckpt_path, map_location=device)
@@ -333,6 +343,7 @@ def load_model(ckpt_path_str: str, device: str):
     model.eval()
     return model, ckpt
 
+
 def run_inference(
     model,
     img2d: np.ndarray,
@@ -343,29 +354,22 @@ def run_inference(
     compute_peak=False,
     capture_features=False,
 ):
-    # Resize to canonical space (PIL, no cv2)
     img_r = np.array(
-        Image.fromarray(img2d.astype(np.float32)).resize(
-            (canon_w, canon_h), resample=Image.BILINEAR
-        ),
+        Image.fromarray(img2d.astype(np.float32)).resize((canon_w, canon_h), resample=Image.BILINEAR),
         dtype=np.float32,
     )
 
-    # Robust normalization (match training)
     img_rn = robust_normalize(img_r)
-
-    X = torch.from_numpy(img_rn).unsqueeze(0).unsqueeze(0).to(device)  # [1,1,H,W]
+    X = torch.from_numpy(img_rn).unsqueeze(0).unsqueeze(0).to(device)
 
     hook = None
     feats = None
     if capture_features:
-        hook = FeatureHook(
-            model, layer_names=["enc1.net", "enc2.net", "bot.net", "dec1.net", "out"]
-        )
+        hook = FeatureHook(model, layer_names=["enc1.net", "enc2.net", "bot.net", "dec1.net", "out"])
 
     with torch.no_grad():
-        z = model(X)                             # logits [1,1,H,W]
-        p = spatial_softmax_2d_logits(z, beta)   # prob   [1,1,H,W]
+        z = model(X)
+        p = spatial_softmax_2d_logits(z, beta)
 
         xy = expected_xy_from_prob(p)[0].cpu().numpy()
         pk = hard_argmax_xy(p)[0].cpu().numpy() if compute_peak else None
@@ -382,7 +386,87 @@ def run_inference(
 
     return img_r, z2d, p2d, xy_dsnt, xy_peak, feats
 
+# ============================================================
+# UI-only helper functions (NEW)
+# ============================================================
 
+def add_title_bar(img_rgb_u8: np.ndarray, title: str, bar_h: int = 30) -> np.ndarray:
+    H, W, _ = img_rgb_u8.shape
+    canvas = np.ones((H + bar_h, W, 3), dtype=np.uint8) * 255
+    canvas[bar_h:, :, :] = img_rgb_u8
+    im = Image.fromarray(canvas)
+    dr = ImageDraw.Draw(im)
+    dr.text((8, 7), title, fill=(0, 0, 0))
+    return np.array(im, dtype=np.uint8)
+
+
+def pad_to_same_height(imgs):
+    hmax = max(im.shape[0] for im in imgs)
+    out = []
+    for im in imgs:
+        H, W, C = im.shape
+        if H < hmax:
+            pad = np.ones((hmax - H, W, C), dtype=np.uint8) * 255
+            im = np.concatenate([im, pad], axis=0)
+        out.append(im)
+    return out
+
+
+def image_to_png_bytes(img_rgb_u8: np.ndarray) -> bytes:
+    bio = BytesIO()
+    Image.fromarray(img_rgb_u8).save(bio, format="PNG")
+    return bio.getvalue()
+
+
+def make_triptych_figure(raw_rgb, canon_overlay, prob_rgb):
+    a = add_title_bar(raw_rgb, "Detected Landmark on Original MRI")
+    b = add_title_bar(canon_overlay, "Probability Overlay in Model Space")
+    c = add_title_bar(prob_rgb, "Spatial Probability Map")
+    a, b, c = pad_to_same_height([a, b, c])
+    gap = 16
+    spacer = np.ones((a.shape[0], gap, 3), dtype=np.uint8) * 255
+    return np.concatenate([a, spacer, b, spacer.copy(), c], axis=1)
+
+
+def make_side_by_side_figure(raw_rgb, canon_overlay):
+    a = add_title_bar(raw_rgb, "Original MRI + Landmark")
+    b = add_title_bar(canon_overlay, "Model-Space Overlay")
+    a, b = pad_to_same_height([a, b])
+    spacer = np.ones((a.shape[0], 16, 3), dtype=np.uint8) * 255
+    return np.concatenate([a, spacer, b], axis=1)
+
+
+def render_feature_maps(feats):
+    st.divider()
+    st.subheader("What did the network learn? (feature maps)")
+    st.write(
+        "Each block outputs multiple channels (feature maps). Early layers often highlight edges and contrast, "
+        "while deeper layers become more task-specific and suppress background."
+    )
+
+    def topk_channels(feat_t: torch.Tensor, k=8):
+        f = feat_t[0]
+        scores = f.abs().mean(dim=(1, 2))
+        idx = torch.topk(scores, k=min(k, f.shape[0])).indices.tolist()
+        return idx
+
+    def tensor_to_u8(t: torch.Tensor):
+        x = t.numpy().astype(np.float32)
+        x = x - x.min()
+        x = x / (x.max() + 1e-8)
+        return (x * 255).clip(0, 255).astype(np.uint8)
+
+    for lname in ["enc1.net", "enc2.net", "bot.net", "dec1.net"]:
+        if lname not in feats:
+            continue
+        ft = feats[lname]
+        idxs = topk_channels(ft, k=8)
+        st.markdown(f"**Layer: `{lname}`**")
+        cols = st.columns(4)
+        for i, ch in enumerate(idxs):
+            fmap = ft[0, ch]
+            img_u8 = tensor_to_u8(fmap)
+            cols[i % 4].image(img_u8, caption=f"ch {ch}", use_container_width=True)
 
 # ============================================================
 # Streamlit UI
@@ -392,16 +476,14 @@ st.set_page_config(page_title="Interactive MRI Landmark Localization Teaching Ap
 
 st.title("Interactive MRI Landmark Localization Teaching App")
 st.write(
-    "Upload a **full-FOV** cine MRI image or a MATLAB `.mat` file containing `image` (HxW or HxWxT). "
-    "Supported cine views include **2CH / 3CH / 4CH / SAX**, as long as the image is **not cropped**. "
-    "The app visualizes the network probability map, DSNT centroid, and an ROI box centered at the centroid. "
-    "**ROI size is automatically set to image size / 2** (scale-consistent across resolutions)."
+    "This app demonstrates how a neural network localizes a target region in full-field-of-view MRI using a "
+    "probability-based spatial representation. The interface is organized to show the main detection result first, "
+    "followed by downloadable figure outputs and optional teaching details."
 )
 
 with st.sidebar:
     st.header("Settings")
 
-    # Default ckpt: relative in app folder
     ckpt_text = st.text_input(
         "Checkpoint path (.pt) [relative ok]",
         value=DEFAULT_CKPT_NAME if DEFAULT_CKPT_PATH.exists() else "",
@@ -417,16 +499,15 @@ with st.sidebar:
         min_value=1.0,
         max_value=200.0,
         step=1.0,
-        help="β controls the sharpness of the probability map (NOT a threshold).",
+        help="β controls the sharpness of the probability map, not a threshold.",
     )
     alpha = st.slider("Heatmap overlay alpha", min_value=0.0, max_value=1.0, value=0.35, step=0.05)
 
     st.subheader("Toggles")
     show_peak = st.checkbox("Show highest-probability point (argmax)", value=False)
-    show_net = st.checkbox("Show network structure", value=True)
-    show_beta = st.checkbox("Show β (beta) explanation", value=True)
+    show_net = st.checkbox("Show network structure", value=False)
+    show_beta = st.checkbox("Show β (beta) explanation", value=False)
     show_torchinfo = st.checkbox("Show layer-by-layer summary (torchinfo)", value=False)
-    st.subheader("Inside the network")
     show_features = st.checkbox("Show intermediate feature maps", value=False)
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -434,32 +515,224 @@ with st.sidebar:
 
 uploaded = st.file_uploader("Upload an image or .mat", type=["png", "jpg", "jpeg", "tif", "tiff", "bmp", "mat"])
 
-if uploaded is None:
-    st.info("Upload an image or .mat to run the centroid predictor.")
-    st.stop()
+# ------------------------------------------------------------
+# Load input: uploaded file or built-in demo
+# ------------------------------------------------------------
 
-# Load input
-try:
-    data = load_user_input(uploaded)
-except Exception as e:
-    st.error("Failed to read file.")
-    st.exception(e)
-    st.stop()
+if uploaded is not None:
+    try:
+        data = load_user_input(uploaded)
+        input_mode = "upload"
+    except Exception as e:
+        st.error("Failed to read file.")
+        st.exception(e)
+        st.stop()
+else:
+    data = load_demo_input()
+    input_mode = "demo"
+    if data is None:
+        st.info("Upload an image or .mat to run the landmark localization app.")
+        st.stop()
 
-# If MAT cine, allow frame selection
 img2d = data["img2d"]
 orig_h, orig_w = int(data["orig_h"]), int(data["orig_w"])
 gt_xy_raw = data.get("gt_xy_raw", None)
 
-st.info(data["note"])
+notice_col1, notice_col2 = st.columns([3, 2])
+with notice_col1:
+    st.info(data["note"])
+with notice_col2:
+    if input_mode == "demo":
+        st.caption("No file uploaded. A built-in demo example is shown automatically.")
 
 if "mat_image" in data and data["mat_image"].ndim == 3:
     T = data["n_frames"]
-    frame_idx = st.slider("Select cine frame (MAT only)", min_value=0, max_value=T - 1, value=0, step=1)
+    frame_idx = st.slider("Select frame (MAT only)", min_value=0, max_value=T - 1, value=0, step=1)
     img2d = data["mat_image"][:, :, frame_idx].astype(np.float32)
     orig_h, orig_w = int(img2d.shape[0]), int(img2d.shape[1])
 
-# Teaching expanders (top)
+# ------------------------------------------------------------
+# Resolve checkpoint
+# ------------------------------------------------------------
+
+ckpt_path = resolve_ckpt_path(ckpt_text if ckpt_text.strip() else DEFAULT_CKPT_NAME)
+if not ckpt_path.exists():
+    st.error(
+        f"Checkpoint not found: {ckpt_path}\n\n"
+        f"Put `{DEFAULT_CKPT_NAME}` in the same folder as this app, or input a valid path."
+    )
+    st.stop()
+
+# ------------------------------------------------------------
+# Run model + prepare visuals
+# ------------------------------------------------------------
+
+try:
+    model, _ckpt = load_model(str(ckpt_path), device=device)
+
+    img_canon, z2d, p2d, xy_dsnt, xy_peak, feats = run_inference(
+        model,
+        img2d,
+        canon_h=int(canon_h),
+        canon_w=int(canon_w),
+        beta=float(beta),
+        device=device,
+        compute_peak=bool(show_peak),
+        capture_features=bool(show_features),
+    )
+
+    xy_dsnt_raw = canon_to_raw(xy_dsnt, orig_h, orig_w, canon_h=int(canon_h), canon_w=int(canon_w))
+    xy_peak_raw = None
+    if xy_peak is not None:
+        xy_peak_raw = canon_to_raw(xy_peak, orig_h, orig_w, canon_h=int(canon_h), canon_w=int(canon_w))
+
+    roi_w_canon = int(canon_w) // 2
+    roi_h_canon = int(canon_h) // 2
+    roi_w_raw = orig_w // 2
+    roi_h_raw = orig_h // 2
+
+    gray01 = to01(img_canon)
+    heat01 = to01(p2d)
+
+    canon_overlay = overlay_heatmap(gray01, heat01, alpha=float(alpha))
+    canon_overlay = draw_cross_rgb(canon_overlay, xy_dsnt[0], xy_dsnt[1], color_rgb=(255, 0, 0))
+    canon_overlay = draw_roi_box_rgb(canon_overlay, xy_dsnt[0], xy_dsnt[1], roi_w_canon, roi_h_canon, color_rgb=(0, 255, 255), t=2)
+    if xy_peak is not None:
+        canon_overlay = draw_cross_rgb(canon_overlay, xy_peak[0], xy_peak[1], color_rgb=(255, 255, 0))
+
+    prob_u8 = (heat01 * 255.0).clip(0, 255).astype(np.uint8)
+    prob_rgb = np.stack([prob_u8, prob_u8, prob_u8], axis=2)
+
+    raw01 = to01(img2d)
+    raw_rgb = (np.stack([raw01, raw01, raw01], axis=2) * 255).astype(np.uint8)
+    raw_rgb = draw_cross_rgb(raw_rgb, xy_dsnt_raw[0], xy_dsnt_raw[1], color_rgb=(255, 0, 0))
+    raw_rgb = draw_roi_box_rgb(raw_rgb, xy_dsnt_raw[0], xy_dsnt_raw[1], roi_w_raw, roi_h_raw, color_rgb=(0, 255, 255), t=2)
+    if xy_peak_raw is not None:
+        raw_rgb = draw_cross_rgb(raw_rgb, xy_peak_raw[0], xy_peak_raw[1], color_rgb=(255, 255, 0))
+    if gt_xy_raw is not None:
+        raw_rgb = draw_cross_rgb(raw_rgb, gt_xy_raw[0], gt_xy_raw[1], color_rgb=(0, 255, 0))
+
+    nsf_triptych = make_triptych_figure(raw_rgb, canon_overlay, prob_rgb)
+    nsf_side_by_side = make_side_by_side_figure(raw_rgb, canon_overlay)
+
+except Exception as e:
+    st.error("Model inference failed.")
+    st.exception(e)
+    st.stop()
+
+# ============================================================
+# Main result first
+# ============================================================
+
+st.divider()
+st.subheader("Main Detection Result")
+
+main_left, main_right = st.columns([1.12, 1.0])
+with main_left:
+    st.image(
+        raw_rgb,
+        caption="Original MRI with detected landmark and automatically scaled ROI.",
+        use_container_width=True,
+    )
+with main_right:
+    st.image(
+        canon_overlay,
+        caption="Model-space probability overlay with DSNT landmark localization.",
+        use_container_width=True,
+    )
+
+metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
+with metric_col1:
+    st.metric("x (original)", f"{xy_dsnt_raw[0]:.1f}")
+with metric_col2:
+    st.metric("y (original)", f"{xy_dsnt_raw[1]:.1f}")
+with metric_col3:
+    st.metric("ROI width", f"{roi_w_raw}")
+with metric_col4:
+    st.metric("ROI height", f"{roi_h_raw}")
+
+# ============================================================
+# Downloadable figure outputs for slides / NSF screenshots
+# ============================================================
+
+st.divider()
+st.subheader("Downloadable Figure Outputs")
+
+fig_col1, fig_col2 = st.columns([1, 1])
+with fig_col1:
+    st.image(nsf_side_by_side, caption="Compact figure for slides or screenshots.", use_container_width=True)
+    st.download_button(
+        label="Download Compact Figure (PNG)",
+        data=image_to_png_bytes(nsf_side_by_side),
+        file_name="mri_landmark_localization_compact.png",
+        mime="image/png",
+    )
+
+with fig_col2:
+    st.image(nsf_triptych, caption="Three-panel figure including probability map.", use_container_width=True)
+    st.download_button(
+        label="Download Three-Panel Figure (PNG)",
+        data=image_to_png_bytes(nsf_triptych),
+        file_name="mri_landmark_localization_triptych.png",
+        mime="image/png",
+    )
+
+# ============================================================
+# Supporting panels below the primary figure
+# ============================================================
+
+st.divider()
+st.subheader("Supporting Visualizations")
+
+supp1, supp2 = st.columns([1, 1])
+with supp1:
+    st.image(prob_rgb, caption="Spatial probability map.", use_container_width=True)
+with supp2:
+    st.image(
+        np.stack([(to01(z2d) * 255).astype(np.uint8)] * 3, axis=2),
+        caption="Raw logits from the last convolution layer.",
+        use_container_width=True,
+    )
+
+st.divider()
+st.subheader("Predicted Coordinates and Quantitative Summary")
+
+sum1, sum2 = st.columns([1, 1])
+with sum1:
+    st.write("**DSNT centroid (canonical x,y):**")
+    st.code(f"({xy_dsnt[0]:.2f}, {xy_dsnt[1]:.2f})")
+
+    st.write("**DSNT centroid (original x,y):**")
+    st.code(f"({xy_dsnt_raw[0]:.2f}, {xy_dsnt_raw[1]:.2f})")
+
+    if xy_peak is not None:
+        st.write("**Argmax / peak (canonical x,y):**")
+        st.code(f"({xy_peak[0]:.2f}, {xy_peak[1]:.2f})")
+
+    if xy_peak_raw is not None:
+        st.write("**Argmax / peak (original x,y):**")
+        st.code(f"({xy_peak_raw[0]:.2f}, {xy_peak_raw[1]:.2f})")
+
+with sum2:
+    st.write("**ROI size (canonical):**")
+    st.code(f"{roi_w_canon} x {roi_h_canon}")
+
+    st.write("**ROI size (original):**")
+    st.code(f"{roi_w_raw} x {roi_h_raw}")
+
+    if gt_xy_raw is not None:
+        dx = xy_dsnt_raw[0] - gt_xy_raw[0]
+        dy = xy_dsnt_raw[1] - gt_xy_raw[1]
+        epe = float(np.sqrt(dx * dx + dy * dy))
+        st.write("**Ground truth centroid (original x,y):**")
+        st.code(f"({gt_xy_raw[0]:.2f}, {gt_xy_raw[1]:.2f})")
+        st.write("**EPE (DSNT vs GT) in original pixels:**")
+        st.code(f"{epe:.2f} px")
+
+# ============================================================
+# Optional teaching sections last
+# ============================================================
+
 if show_net:
     with st.expander("Network structure (TinyUNetLogits)", expanded=False):
         st.code(str(TinyUNetLogits(in_ch=1, base=32)), language="text")
@@ -467,7 +740,7 @@ if show_net:
 if show_torchinfo:
     with st.expander("Layer-by-layer summary (optional: torchinfo)", expanded=False):
         try:
-            from torchinfo import summary  # pip install torchinfo
+            from torchinfo import summary
             m = TinyUNetLogits(in_ch=1, base=32)
             s = summary(m, input_size=(1, 1, int(canon_h), int(canon_w)), verbose=0)
             st.text(str(s))
@@ -493,181 +766,21 @@ if show_beta:
             "No threshold is used. β only controls concentration."
         )
 
-
-# Resolve checkpoint path (relative by default)
-ckpt_path = resolve_ckpt_path(ckpt_text if ckpt_text.strip() else DEFAULT_CKPT_NAME)
-
-# Checkpoint existence
-if not ckpt_path.exists():
-    st.error(
-        f"Checkpoint not found: {ckpt_path}\n\n"
-        f"Put `{DEFAULT_CKPT_NAME}` in the same folder as this app, or input a valid path."
-    )
-    st.stop()
-
-# Run model + inference + visuals (guarded)
-try:
-    model, _ckpt = load_model(str(ckpt_path), device=device)
-
-    img_canon, z2d, p2d, xy_dsnt, xy_peak, feats = run_inference(
-        model, img2d,
-        canon_h=int(canon_h), canon_w=int(canon_w),
-        beta=float(beta), device=device,
-        compute_peak=bool(show_peak),
-        capture_features=True  # turn on
-    )
-    
-    if show_features and feats is not None:
-        st.divider()
-        st.subheader("What did the network learn? (feature maps)")
-
-        st.write(
-            "Each block outputs multiple **channels** (feature maps). Early layers highlight edges/contrast; "
-            "deeper layers become more heart-specific and suppress background. "
-            "Below we visualize a few channels with the strongest activation."
+with st.expander("How the network turns features into a probability map"):
+    st.write("Logits are the raw scores from the last convolution. Spatial softmax transforms them into probabilities.")
+    pcol1, pcol2 = st.columns([1, 1])
+    with pcol1:
+        st.image(
+            np.stack([(to01(z2d) * 255).astype(np.uint8)] * 3, axis=2),
+            caption="Logits",
+            use_container_width=True,
+        )
+    with pcol2:
+        st.image(
+            np.stack([(to01(p2d) * 255).astype(np.uint8)] * 3, axis=2),
+            caption="Probability map after spatial softmax",
+            use_container_width=True,
         )
 
-        def topk_channels(feat_t: torch.Tensor, k=8):
-            # feat_t: [1,C,H,W]
-            f = feat_t[0]  # [C,H,W]
-            # pick channels with largest mean absolute activation
-            scores = f.abs().mean(dim=(1,2))
-            idx = torch.topk(scores, k=min(k, f.shape[0])).indices.tolist()
-            return idx
-
-        def tensor_to_u8(t: torch.Tensor):
-            # t: [H,W]
-            x = t.numpy().astype(np.float32)
-            x = x - x.min()
-            x = x / (x.max() + 1e-8)
-            return (x * 255).clip(0,255).astype(np.uint8)
-
-        for lname in ["enc1.net", "enc2.net", "bot.net", "dec1.net"]:
-            if lname not in feats:
-                continue
-            ft = feats[lname]  # [1,C,H,W]
-            idxs = topk_channels(ft, k=8)
-
-            st.markdown(f"**Layer: `{lname}`**  (showing {len(idxs)} channels with strongest activation)")
-            cols = st.columns(4)
-            for i, ch in enumerate(idxs):
-                fmap = ft[0, ch]
-                img_u8 = tensor_to_u8(fmap)
-                cols[i % 4].image(img_u8, caption=f"ch {ch}", use_container_width=True)
-
-    # Convert predicted points to original coords
-    xy_dsnt_raw = canon_to_raw(xy_dsnt, orig_h, orig_w, canon_h=int(canon_h), canon_w=int(canon_w))
-    xy_peak_raw = None
-    if xy_peak is not None:
-        xy_peak_raw = canon_to_raw(xy_peak, orig_h, orig_w, canon_h=int(canon_h), canon_w=int(canon_w))
-
-    # ROI definition: image size / 2
-    roi_w_canon = int(canon_w) // 2
-    roi_h_canon = int(canon_h) // 2
-    roi_w_raw = orig_w // 2
-    roi_h_raw = orig_h // 2
-
-    # Visuals: canonical
-    gray01 = to01(img_canon)
-    heat01 = to01(p2d)
-
-    canon_overlay = overlay_heatmap(gray01, heat01, alpha=float(alpha))
-    canon_overlay = draw_cross_rgb(canon_overlay, xy_dsnt[0], xy_dsnt[1], color_rgb=(255, 0, 0))  # DSNT red
-    canon_overlay = draw_roi_box_rgb(
-        canon_overlay,
-        xy_dsnt[0], xy_dsnt[1],
-        roi_w_canon, roi_h_canon,
-        color_rgb=(0, 255, 255), t=2
-    )
-
-    if xy_peak is not None:
-        canon_overlay = draw_cross_rgb(canon_overlay, xy_peak[0], xy_peak[1], color_rgb=(255, 255, 0))  # argmax yellow
-
-    prob_u8 = (heat01 * 255.0).clip(0, 255).astype(np.uint8)
-    prob_rgb = np.stack([prob_u8, prob_u8, prob_u8], axis=2)
-
-    # Visuals: original
-    raw01 = to01(img2d)
-    raw_rgb = (np.stack([raw01, raw01, raw01], axis=2) * 255).astype(np.uint8)
-
-    raw_rgb = draw_cross_rgb(raw_rgb, xy_dsnt_raw[0], xy_dsnt_raw[1], color_rgb=(255, 0, 0))  # DSNT red
-    raw_rgb = draw_roi_box_rgb(
-        raw_rgb,
-        xy_dsnt_raw[0], xy_dsnt_raw[1],
-        roi_w_raw, roi_h_raw,
-        color_rgb=(0, 255, 255), t=2
-    )
-
-    if xy_peak_raw is not None:
-        raw_rgb = draw_cross_rgb(raw_rgb, xy_peak_raw[0], xy_peak_raw[1], color_rgb=(255, 255, 0))  # argmax yellow
-    if gt_xy_raw is not None:
-        raw_rgb = draw_cross_rgb(raw_rgb, gt_xy_raw[0], gt_xy_raw[1], color_rgb=(0, 255, 0))  # GT green
-
-except Exception as e:
-    st.error("Model inference failed.")
-    st.exception(e)
-    st.stop()
-
-# ============================================================
-# Results
-# ============================================================
-
-c1, c2 = st.columns([1, 1])
-
-st.subheader("Canonical (model space): probability overlay + DSNT centroid + ROI (size = canon/2)")
-st.image(canon_overlay, use_container_width=True)
-
-st.subheader("Canonical probability map")
-st.image(prob_rgb, caption="Brighter = higher probability.", use_container_width=True)
-
-
-st.divider()
-st.subheader("Predicted coordinates (1-based)")
-
-st.write("**DSNT centroid (canonical x,y):**")
-st.code(f"({xy_dsnt[0]:.2f}, {xy_dsnt[1]:.2f})")
-
-st.write("**DSNT centroid (original x,y):**")
-st.code(f"({xy_dsnt_raw[0]:.2f}, {xy_dsnt_raw[1]:.2f})")
-
-if xy_peak is not None:
-    st.write("**Argmax / peak (canonical x,y):**")
-    st.code(f"({xy_peak[0]:.2f}, {xy_peak[1]:.2f})")
-
-if xy_peak_raw is not None:
-    st.write("**Argmax / peak (original x,y):**")
-    st.code(f"({xy_peak_raw[0]:.2f}, {xy_peak_raw[1]:.2f})")
-
-st.write("**ROI size (canonical):**")
-st.code(f"{roi_w_canon} x {roi_h_canon}")
-
-st.write("**ROI size (original):**")
-st.code(f"{roi_w_raw} x {roi_h_raw}")
-
-if gt_xy_raw is not None:
-    dx = xy_dsnt_raw[0] - gt_xy_raw[0]
-    dy = xy_dsnt_raw[1] - gt_xy_raw[1]
-    epe = float(np.sqrt(dx * dx + dy * dy))
-    st.write("**Ground truth centroid (original x,y):**")
-    st.code(f"({gt_xy_raw[0]:.2f}, {gt_xy_raw[1]:.2f})")
-    st.write("**EPE (DSNT vs GT) in original pixels:**")
-    st.code(f"{epe:.2f} px")
-
-with st.expander("What is β (softmax beta)?"):
-    st.markdown("**β is not a threshold.** It controls how *peaked* the probability map becomes.")
-    st.code(
-        "p(x,y) = exp(β * z(x,y)) / sum_{u,v} exp(β * z(u,v))\n"
-        "x_hat = sum_{x,y} p(x,y) * x\n"
-        "y_hat = sum_{x,y} p(x,y) * y\n"
-        "\n"
-        "Argmax (yellow) = location of max p(x,y) (no threshold)."
-    )
-
-with st.expander("How the network turns features into a probability map"):
-    st.write("**Logits** are the raw scores from the last convolution. Softmax(β) turns them into probabilities.")
-    st.image(np.stack([(to01(z2d)*255).astype(np.uint8)]*3, axis=2),
-             caption="Logits (higher = more likely centroid).", use_container_width=True)
-    st.image(np.stack([(to01(p2d)*255).astype(np.uint8)]*3, axis=2),
-             caption="Probability map after spatial softmax.", use_container_width=True)
-
-
+if show_features and feats is not None:
+    render_feature_maps(feats)
