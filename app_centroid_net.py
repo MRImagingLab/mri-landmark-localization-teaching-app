@@ -513,7 +513,16 @@ with st.sidebar:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     st.caption(f"Device: {device}")
 
-uploaded = st.file_uploader("Upload an image or .mat", type=["png", "jpg", "jpeg", "tif", "tiff", "bmp", "mat"])
+top_left, top_right = st.columns([0.95, 1.25])
+
+with top_left:
+    st.markdown("### Upload an image or .mat")
+    uploaded = st.file_uploader(
+        "Upload an image or .mat",
+        type=["png", "jpg", "jpeg", "tif", "tiff", "bmp", "mat"],
+        label_visibility="collapsed",
+    )
+    st.caption("PNG, JPG, JPEG, TIF, TIFF, BMP, or MATLAB .mat")
 
 # ------------------------------------------------------------
 # Load input: uploaded file or built-in demo
@@ -531,25 +540,44 @@ else:
     data = load_demo_input()
     input_mode = "demo"
     if data is None:
-        st.info("Upload an image or .mat to run the landmark localization app.")
+        with top_right:
+            st.markdown("### Example preview")
+            st.info("Place `demo_example.png` in the same folder as this app to show a built-in example here.")
         st.stop()
 
 img2d = data["img2d"]
 orig_h, orig_w = int(data["orig_h"]), int(data["orig_w"])
 gt_xy_raw = data.get("gt_xy_raw", None)
 
-notice_col1, notice_col2 = st.columns([3, 2])
-with notice_col1:
-    st.info(data["note"])
-with notice_col2:
-    if input_mode == "demo":
-        st.caption("No file uploaded. A built-in demo example is shown automatically.")
-
 if "mat_image" in data and data["mat_image"].ndim == 3:
-    T = data["n_frames"]
-    frame_idx = st.slider("Select frame (MAT only)", min_value=0, max_value=T - 1, value=0, step=1)
+    with top_left:
+        T = data["n_frames"]
+        frame_idx = st.slider("Select frame (MAT only)", min_value=0, max_value=T - 1, value=0, step=1)
     img2d = data["mat_image"][:, :, frame_idx].astype(np.float32)
     orig_h, orig_w = int(img2d.shape[0]), int(img2d.shape[1])
+
+preview01 = to01(img2d)
+preview_rgb = (np.stack([preview01, preview01, preview01], axis=2) * 255).astype(np.uint8)
+
+with top_right:
+    st.markdown("### Example preview")
+    preview_box = st.container(border=True)
+    with preview_box:
+        st.image(
+            preview_rgb,
+            use_container_width=True,
+            caption=(
+                "Built-in demonstration example."
+                if input_mode == "demo"
+                else "Uploaded input preview."
+            ),
+        )
+    if input_mode == "demo":
+        st.caption(data["note"])
+    else:
+        st.caption("Uploaded image loaded successfully.")
+
+st.divider()
 
 # ------------------------------------------------------------
 # Resolve checkpoint
