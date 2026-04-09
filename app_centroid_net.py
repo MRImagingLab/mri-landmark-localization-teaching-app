@@ -388,7 +388,7 @@ def run_inference(
 # Streamlit UI
 # ============================================================
 
-st.set_page_config(page_title="Cine MRI Centroid Predictor (DSNT Teaching App)", layout="wide")
+st.set_page_config(page_title="Interactive MRI Landmark Localization Teaching App", layout="wide")
 
 st.title("Cine MRI Centroid Predictor (DSNT Network)")
 st.write(
