@@ -527,6 +527,20 @@ with top_left:
 # ------------------------------------------------------------
 # Load input: uploaded file or built-in demo
 # ------------------------------------------------------------
+top_left, top_right = st.columns([0.95, 1.25])
+
+with top_left:
+    st.markdown("### Upload an image or .mat")
+    uploaded = st.file_uploader(
+        "Upload an image or .mat",
+        type=["png", "jpg", "jpeg", "tif", "tiff", "bmp", "mat"],
+        label_visibility="collapsed",
+    )
+    st.caption("PNG, JPG, JPEG, TIF, TIFF, BMP, or MATLAB .mat")
+
+# ------------------------------------------------------------
+# Load input: uploaded file or built-in demo
+# ------------------------------------------------------------
 
 if uploaded is not None:
     try:
@@ -555,6 +569,22 @@ if "mat_image" in data and data["mat_image"].ndim == 3:
         frame_idx = st.slider("Select frame (MAT only)", min_value=0, max_value=T - 1, value=0, step=1)
     img2d = data["mat_image"][:, :, frame_idx].astype(np.float32)
     orig_h, orig_w = int(img2d.shape[0]), int(img2d.shape[1])
+
+preview01 = to01(img2d)
+preview_rgb = (np.stack([preview01, preview01, preview01], axis=2) * 255).astype(np.uint8)
+
+with top_right:
+    st.markdown("### Example preview")
+    with st.container(border=True):
+        st.image(
+            preview_rgb,
+            use_container_width=True,
+            caption="Built-in demonstration example." if input_mode == "demo" else "Uploaded input preview.",
+        )
+    st.caption(data["note"] if input_mode == "demo" else "Uploaded image loaded successfully.")
+
+st.divider()
+
 
 preview01 = to01(img2d)
 preview_rgb = (np.stack([preview01, preview01, preview01], axis=2) * 255).astype(np.uint8)
