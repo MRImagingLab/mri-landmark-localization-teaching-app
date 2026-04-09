@@ -3,12 +3,11 @@
 #
 # UI rewrite notes:
 #   - Keeps the existing working model and utility functions unchanged
-#   - Moves the main result figure to the first visible output region
 #   - Adds a built-in demo preview when no upload is provided
-#   - Adds download buttons for NSF-ready PNG figures
-#   - Keeps explanations and feature-map teaching sections below the primary figure
+#   - Shows a clean top preview for print/screenshot purposes
+#   - Uses compact figure panels first instead of a large mostly-black canonical panel
+#   - Moves teaching expanders below the main visual outputs
 
-import os
 from io import BytesIO
 from pathlib import Path
 from collections import OrderedDict
@@ -330,7 +329,6 @@ def load_demo_input():
 # ============================================================
 
 @st.cache_resource
-
 def load_model(ckpt_path_str: str, device: str):
     ckpt_path = str(ckpt_path_str)
     ckpt = torch.load(ckpt_path, map_location=device)
@@ -418,6 +416,28 @@ def image_to_png_bytes(img_rgb_u8: np.ndarray) -> bytes:
     return bio.getvalue()
 
 
+def center_crop_nonblack(img_rgb_u8: np.ndarray, pad: int = 24) -> np.ndarray:
+    gray = img_rgb_u8.mean(axis=2)
+    mask = gray > 8
+    if not np.any(mask):
+        return img_rgb_u8
+    ys, xs = np.where(mask)
+    y0 = max(0, ys.min() - pad)
+    y1 = min(img_rgb_u8.shape[0], ys.max() + pad + 1)
+    x0 = max(0, xs.min() - pad)
+    x1 = min(img_rgb_u8.shape[1], xs.max() + pad + 1)
+    return img_rgb_u8[y0:y1, x0:x1, :]
+
+
+def resize_rgb(img_rgb_u8: np.ndarray, target_w: int) -> np.ndarray:
+    H, W, _ = img_rgb_u8.shape
+    if W <= 0:
+        return img_rgb_u8
+    scale = target_w / float(W)
+    target_h = max(1, int(round(H * scale)))
+    return np.array(Image.fromarray(img_rgb_u8).resize((target_w, target_h), resample=Image.BILINEAR))
+
+
 def make_triptych_figure(raw_rgb, canon_overlay, prob_rgb):
     a = add_title_bar(raw_rgb, "Detected Landmark on Original MRI")
     b = add_title_bar(canon_overlay, "Probability Overlay in Model Space")
@@ -477,8 +497,7 @@ st.set_page_config(page_title="Interactive MRI Landmark Localization Teaching Ap
 st.title("Interactive MRI Landmark Localization Teaching App")
 st.write(
     "This app demonstrates how a neural network localizes a target region in full-field-of-view MRI using a "
-    "probability-based spatial representation. The interface is organized to show the main detection result first, "
-    "followed by downloadable figure outputs and optional teaching details."
+    "probability-based spatial representation. The layout below is optimized for clean screenshots and printing."
 )
 
 with st.sidebar:
@@ -513,6 +532,10 @@ with st.sidebar:
     device = "cuda" if torch.cuda.is_available() else "cpu"
     st.caption(f"Device: {device}")
 
+# ------------------------------------------------------------
+# Top area: uploader + preview
+# ------------------------------------------------------------
+
 top_left, top_right = st.columns([0.95, 1.25])
 
 with top_left:
@@ -523,24 +546,6 @@ with top_left:
         label_visibility="collapsed",
     )
     st.caption("PNG, JPG, JPEG, TIF, TIFF, BMP, or MATLAB .mat")
-
-# ------------------------------------------------------------
-# Load input: uploaded file or built-in demo
-# ------------------------------------------------------------
-top_left, top_right = st.columns([0.95, 1.25])
-
-with top_left:
-    st.markdown("### Upload an image or .mat")
-    uploaded = st.file_uploader(
-        "Upload an image or .mat",
-        type=["png", "jpg", "jpeg", "tif", "tiff", "bmp", "mat"],
-        label_visibility="collapsed",
-    )
-    st.caption("PNG, JPG, JPEG, TIF, TIFF, BMP, or MATLAB .mat")
-
-# ------------------------------------------------------------
-# Load input: uploaded file or built-in demo
-# ------------------------------------------------------------
 
 if uploaded is not None:
     try:
@@ -582,30 +587,6 @@ with top_right:
             caption="Built-in demonstration example." if input_mode == "demo" else "Uploaded input preview.",
         )
     st.caption(data["note"] if input_mode == "demo" else "Uploaded image loaded successfully.")
-
-st.divider()
-
-
-preview01 = to01(img2d)
-preview_rgb = (np.stack([preview01, preview01, preview01], axis=2) * 255).astype(np.uint8)
-
-with top_right:
-    st.markdown("### Example preview")
-    preview_box = st.container(border=True)
-    with preview_box:
-        st.image(
-            preview_rgb,
-            use_container_width=True,
-            caption=(
-                "Built-in demonstration example."
-                if input_mode == "demo"
-                else "Uploaded input preview."
-            ),
-        )
-    if input_mode == "demo":
-        st.caption(data["note"])
-    else:
-        st.caption("Uploaded image loaded successfully.")
 
 st.divider()
 
@@ -670,8 +651,13 @@ try:
     if gt_xy_raw is not None:
         raw_rgb = draw_cross_rgb(raw_rgb, gt_xy_raw[0], gt_xy_raw[1], color_rgb=(0, 255, 0))
 
-    nsf_triptych = make_triptych_figure(raw_rgb, canon_overlay, prob_rgb)
-    nsf_side_by_side = make_side_by_side_figure(raw_rgb, canon_overlay)
+    canon_overlay_crop = center_crop_nonblack(canon_overlay, pad=32)
+    prob_rgb_crop = center_crop_nonblack(prob_rgb, pad=32)
+    canon_overlay_panel = resize_rgb(canon_overlay_crop, target_w=520)
+    prob_rgb_panel = resize_rgb(prob_rgb_crop, target_w=520)
+
+    nsf_triptych = make_triptych_figure(raw_rgb, canon_overlay_panel, prob_rgb_panel)
+    nsf_side_by_side = make_side_by_side_figure(raw_rgb, canon_overlay_panel)
 
 except Exception as e:
     st.error("Model inference failed.")
@@ -679,13 +665,12 @@ except Exception as e:
     st.stop()
 
 # ============================================================
-# Main result first
+# Main result first: avoid the giant black panel
 # ============================================================
 
-st.divider()
 st.subheader("Main Detection Result")
 
-main_left, main_right = st.columns([1.12, 1.0])
+main_left, main_right = st.columns([1.05, 1.0])
 with main_left:
     st.image(
         raw_rgb,
@@ -694,8 +679,8 @@ with main_left:
     )
 with main_right:
     st.image(
-        canon_overlay,
-        caption="Model-space probability overlay with DSNT landmark localization.",
+        nsf_side_by_side,
+        caption="Compact summary figure for screenshots and printing.",
         use_container_width=True,
     )
 
@@ -710,7 +695,7 @@ with metric_col4:
     st.metric("ROI height", f"{roi_h_raw}")
 
 # ============================================================
-# Downloadable figure outputs for slides / NSF screenshots
+# Downloadable figure outputs
 # ============================================================
 
 st.divider()
@@ -727,7 +712,7 @@ with fig_col1:
     )
 
 with fig_col2:
-    st.image(nsf_triptych, caption="Three-panel figure including probability map.", use_container_width=True)
+    st.image(nsf_triptych, caption="Three-panel figure including cropped model-space panels.", use_container_width=True)
     st.download_button(
         label="Download Three-Panel Figure (PNG)",
         data=image_to_png_bytes(nsf_triptych),
@@ -744,13 +729,9 @@ st.subheader("Supporting Visualizations")
 
 supp1, supp2 = st.columns([1, 1])
 with supp1:
-    st.image(prob_rgb, caption="Spatial probability map.", use_container_width=True)
+    st.image(canon_overlay_panel, caption="Cropped model-space probability overlay.", use_container_width=True)
 with supp2:
-    st.image(
-        np.stack([(to01(z2d) * 255).astype(np.uint8)] * 3, axis=2),
-        caption="Raw logits from the last convolution layer.",
-        use_container_width=True,
-    )
+    st.image(prob_rgb_panel, caption="Cropped spatial probability map.", use_container_width=True)
 
 st.divider()
 st.subheader("Predicted Coordinates and Quantitative Summary")
@@ -835,8 +816,8 @@ with st.expander("How the network turns features into a probability map"):
         )
     with pcol2:
         st.image(
-            np.stack([(to01(p2d) * 255).astype(np.uint8)] * 3, axis=2),
-            caption="Probability map after spatial softmax",
+            prob_rgb_panel,
+            caption="Cropped probability map after spatial softmax",
             use_container_width=True,
         )
 
