@@ -390,7 +390,7 @@ def run_inference(
 
 st.set_page_config(page_title="Interactive MRI Landmark Localization Teaching App", layout="wide")
 
-st.title("Cine MRI Centroid Predictor (DSNT Network)")
+st.title("Interactive MRI Landmark Localization Teaching App")
 st.write(
     "Upload a **full-FOV** cine MRI image or a MATLAB `.mat` file containing `image` (HxW or HxWxT). "
     "Supported cine views include **2CH / 3CH / 4CH / SAX**, as long as the image is **not cropped**. "
